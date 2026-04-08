@@ -1,0 +1,41 @@
+# Environment and secrets — never commit API keys or credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+secrets.*
+credentials.*
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Streamlit secrets (config.toml is committed for deployment)
+.streamlit/secrets.toml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test cache
+.pytest_cache/
+
+# Planning docs containing personal strategy — not for public repo
+master-plan.txt
+plans/
+tasks/
+Anthropic Life Sciences Strategy*
+CLAUDE.md
+qa-breaker.js

@@ -411,7 +411,7 @@ elif st.session_state.get("analysis_result"):
 
     # --- Overall assessment ---
     if result.overall_assessment:
-        st.info(result.overall_assessment, icon="\U0001f4cb")
+        st.info(html.escape(result.overall_assessment), icon="\U0001f4cb")
 
     # --- Step-by-step walkthrough ---
     st.subheader("Step-by-Step Analysis")
@@ -443,7 +443,9 @@ elif st.session_state.get("analysis_result"):
             f"{icon}  Step {step.step_number}: {step_label}",
             expanded=has_visible_critical,
         ):
-            st.markdown(f"**Protocol text:** {step.original_text}")
+            st.markdown(
+                f"**Protocol text:** {html.escape(step.original_text)}"
+            )
 
             if not visible_flags:
                 st.success(

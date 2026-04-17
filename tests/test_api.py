@@ -1,14 +1,13 @@
-"""Tests for llm/api.py — JSON extraction, API calls, and response parsing."""
+"""Tests for llm/api.py — tool-use plumbing, API calls, and response parsing."""
 
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from llm.api import (
-    _extract_json,
     _get_client,
     _call_api,
+    _extract_tool_input,
     _parse_response,
     analyze_protocol,
     LabGuardAPIError,
@@ -18,111 +17,58 @@ from llm.api import (
     TEMPERATURE,
     API_TIMEOUT,
 )
+from llm.tools import ANALYSIS_TOOL, ANALYSIS_TOOL_NAME, ANALYSIS_TOOL_CHOICE
 from models.schemas import ProtocolAnalysis, MAX_INPUT_LENGTH
-from tests.conftest import make_claude_response_dict
+from tests.conftest import make_claude_response_dict, make_tool_use_block
 
 
 # ---------------------------------------------------------------------------
-# _extract_json() — 3 code paths + bug fix verification
+# _extract_tool_input() — pulls the forced tool_use block's input dict
 # ---------------------------------------------------------------------------
 
-class TestExtractJson:
-    """Tests for JSON extraction from raw API response text."""
+class TestExtractToolInput:
+    """Tests for extracting the tool_use input dict from a response."""
 
-    # -- Path 1: Direct parse --
+    def test_returns_input_from_tool_use_block(self, sample_claude_response_dict):
+        """Return the input dict when a matching tool_use block is present."""
+        msg = MagicMock()
+        msg.content = [make_tool_use_block(sample_claude_response_dict)]
+        result = _extract_tool_input(msg)
+        assert result == sample_claude_response_dict
 
-    def test_direct_valid_json(self):
-        """Return valid JSON string unchanged."""
-        raw = '{"key": "value"}'
-        assert _extract_json(raw) == raw
+    def test_skips_text_blocks_before_tool_use(self, sample_claude_response_dict):
+        """Tolerate a leading text block and still find the tool_use."""
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.name = None
+        msg = MagicMock()
+        msg.content = [text_block, make_tool_use_block(sample_claude_response_dict)]
+        assert _extract_tool_input(msg) == sample_claude_response_dict
 
-    def test_direct_json_with_whitespace(self):
-        """Strip outer whitespace and return valid JSON."""
-        raw = '  {"key": "value"}  \n'
-        assert _extract_json(raw) == '{"key": "value"}'
+    def test_ignores_other_tool_names(self, sample_claude_response_dict):
+        """Ignore tool_use blocks that don't match the analysis tool name."""
+        wrong = make_tool_use_block(sample_claude_response_dict, name="other_tool")
+        msg = MagicMock()
+        msg.content = [wrong]
+        with pytest.raises(LabGuardAPIError, match="unexpected response format"):
+            _extract_tool_input(msg)
 
-    def test_direct_nested_json(self):
-        """Handle nested JSON objects."""
-        raw = '{"outer": {"inner": "value"}, "list": [1, 2]}'
-        assert _extract_json(raw) == raw
+    def test_raises_when_only_text_block(self):
+        """Raise when Claude replied with text instead of a tool call."""
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.name = None
+        msg = MagicMock()
+        msg.content = [text_block]
+        with pytest.raises(LabGuardAPIError, match="unexpected response format"):
+            _extract_tool_input(msg)
 
-    # -- Path 2: Markdown fence stripping --
-
-    def test_json_fence(self):
-        """Extract JSON from ```json code fence."""
-        raw = '```json\n{"key": "value"}\n```'
-        assert _extract_json(raw) == '{"key": "value"}'
-
-    def test_generic_fence(self):
-        """Extract JSON from generic ``` code fence."""
-        raw = '```\n{"key": "value"}\n```'
-        assert _extract_json(raw) == '{"key": "value"}'
-
-    def test_fence_with_surrounding_text(self):
-        """Extract JSON from fence with text before and after."""
-        raw = 'Here is the result:\n```json\n{"key": "value"}\n```\nDone.'
-        assert _extract_json(raw) == '{"key": "value"}'
-
-    def test_invalid_json_in_fence_falls_through(self):
-        """Invalid JSON inside fence falls through to brace matching."""
-        raw = '```json\n{not valid json}\n```'
-        assert _extract_json(raw) is None
-
-    # -- Path 3: Brace matching --
-
-    def test_brace_match_with_leading_text(self):
-        """Extract JSON from text with leading non-JSON content."""
-        raw = 'Here is the analysis: {"key": "value"}'
-        assert _extract_json(raw) == '{"key": "value"}'
-
-    def test_brace_match_nested_objects(self):
-        """Handle nested braces correctly."""
-        obj = {"outer": {"middle": {"inner": "deep"}}}
-        raw = f"Some text {json.dumps(obj)} more text"
-        result = _extract_json(raw)
-        assert json.loads(result) == obj
-
-    def test_brace_in_string_value(self):
-        """Handle } inside a JSON string value without premature termination."""
-        obj = {"description": "Use format {key} for templates"}
-        raw = f"Analysis: {json.dumps(obj)}"
-        result = _extract_json(raw)
-        assert result is not None
-        assert json.loads(result) == obj
-
-    def test_escaped_quotes_in_string(self):
-        """Handle escaped quotes inside JSON string values."""
-        raw = r'Text {"key": "she said \"hello\""}'
-        result = _extract_json(raw)
-        assert result is not None
-        parsed = json.loads(result)
-        assert "hello" in parsed["key"]
-
-    def test_complex_brace_in_string(self):
-        """Handle multiple braces inside string values."""
-        obj = {"text": "if (x > 0) { return y; } else { return z; }"}
-        raw = f"Result: {json.dumps(obj)}"
-        result = _extract_json(raw)
-        assert result is not None
-        assert json.loads(result) == obj
-
-    # -- Negative cases --
-
-    def test_no_json_returns_none(self):
-        """Return None when no JSON is present."""
-        assert _extract_json("Just plain text, no JSON here.") is None
-
-    def test_no_opening_brace_returns_none(self):
-        """Return None when there is no opening brace."""
-        assert _extract_json("No braces at all") is None
-
-    def test_unmatched_braces_returns_none(self):
-        """Return None when braces are unmatched."""
-        assert _extract_json('{"key": "value"') is None
-
-    def test_empty_string_returns_none(self):
-        """Return None for empty input."""
-        assert _extract_json("") is None
+    def test_raises_on_empty_content(self):
+        """Raise when the response has no content blocks at all."""
+        msg = MagicMock()
+        msg.content = []
+        with pytest.raises(LabGuardAPIError, match="empty response"):
+            _extract_tool_input(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +218,17 @@ class TestCallApi:
         result = _call_api("test protocol")
         assert result is mock_msg
 
+    @patch("llm.api._get_client")
+    def test_forces_analysis_tool_use(self, mock_get_client):
+        """Request forces the analysis tool via tool_choice."""
+        mock_client = self._setup_mock_client(return_value=MagicMock())
+        mock_get_client.return_value = mock_client
+        _call_api("test protocol")
+        kwargs = mock_client.messages.create.call_args.kwargs
+        assert kwargs["tools"] == [ANALYSIS_TOOL]
+        assert kwargs["tool_choice"] == ANALYSIS_TOOL_CHOICE
+        assert kwargs["tool_choice"]["name"] == ANALYSIS_TOOL_NAME
+
 
 # ---------------------------------------------------------------------------
 # _parse_response()
@@ -306,12 +263,10 @@ class TestParseResponse:
             _parse_response(msg, "protocol")
 
     def test_invalid_schema_raises_error(self):
-        """Raise error when JSON doesn't match expected schema."""
+        """Raise error when the tool_use input doesn't match expected schema."""
         msg = MagicMock()
-        msg.stop_reason = "end_turn"
-        text_block = MagicMock()
-        text_block.text = '{"wrong": "schema"}'
-        msg.content = [text_block]
+        msg.stop_reason = "tool_use"
+        msg.content = [make_tool_use_block({"wrong": "schema"})]
         with pytest.raises(LabGuardAPIError, match="structured incorrectly"):
             _parse_response(msg, "protocol")
 

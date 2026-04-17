@@ -19,9 +19,10 @@ class TestSystemPrompt:
             )
 
     def test_all_severities_present(self):
-        """System prompt must reference every severity level."""
+        """System prompt must reference every severity level (case-insensitive)."""
+        prompt_lower = ANALYSIS_SYSTEM_PROMPT.lower()
         for severity in VALID_SEVERITIES:
-            assert severity in ANALYSIS_SYSTEM_PROMPT, (
+            assert severity.lower() in prompt_lower, (
                 f"Severity '{severity}' missing from system prompt"
             )
 
@@ -35,9 +36,9 @@ class TestSystemPrompt:
         assert "generic" in ANALYSIS_SYSTEM_PROMPT.lower() or \
                "wear gloves" in ANALYSIS_SYSTEM_PROMPT.lower()
 
-    def test_prompt_requires_json_output(self):
-        """System prompt instructs JSON-only output."""
-        assert "JSON" in ANALYSIS_SYSTEM_PROMPT
+    def test_prompt_directs_tool_call(self):
+        """System prompt instructs Claude to call the analysis tool."""
+        assert "record_protocol_analysis" in ANALYSIS_SYSTEM_PROMPT
 
 
 class TestBuildUserMessage:

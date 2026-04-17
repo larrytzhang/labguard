@@ -39,3 +39,8 @@ tasks/
 Anthropic Life Sciences Strategy*
 CLAUDE.md
 qa-breaker.js
+
+# Claude Code session transcripts — may contain private strategy/context
+recent-coding-session.txt
+*coding-session*.txt
+*.session.log

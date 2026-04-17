@@ -3,10 +3,11 @@
 All API calls are mocked — no ANTHROPIC_API_KEY required to run tests.
 """
 
-import json
 from unittest.mock import MagicMock
 
 import pytest
+
+from llm.tools import ANALYSIS_TOOL_NAME
 
 
 # ---------------------------------------------------------------------------
@@ -83,20 +84,21 @@ def sample_claude_response_dict():
     return make_claude_response_dict()
 
 
-@pytest.fixture
-def sample_claude_response_json(sample_claude_response_dict):
-    """Return the sample response as a JSON string."""
-    return json.dumps(sample_claude_response_dict)
+def make_tool_use_block(tool_input: dict, name: str = ANALYSIS_TOOL_NAME):
+    """Build a mock tool_use content block with the given input dict."""
+    block = MagicMock()
+    block.type = "tool_use"
+    block.name = name
+    block.input = tool_input
+    return block
 
 
 @pytest.fixture
-def mock_anthropic_message(sample_claude_response_json):
-    """Return a mock anthropic.types.Message with valid content."""
+def mock_anthropic_message(sample_claude_response_dict):
+    """Return a mock anthropic.types.Message with a valid tool_use block."""
     msg = MagicMock()
-    msg.stop_reason = "end_turn"
-    text_block = MagicMock()
-    text_block.text = sample_claude_response_json
-    msg.content = [text_block]
+    msg.stop_reason = "tool_use"
+    msg.content = [make_tool_use_block(sample_claude_response_dict)]
     return msg
 
 

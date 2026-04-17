@@ -2,19 +2,21 @@
 
 Public interface: analyze_protocol() and LabGuardAPIError.
 All other functions are private implementation details.
+
+Uses forced tool use so the model's output is a structured dict that
+already matches ClaudeResponsePayload — no text extraction required.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 
 import anthropic
 import streamlit as st
 
 from llm.prompts import ANALYSIS_SYSTEM_PROMPT, build_user_message
+from llm.tools import ANALYSIS_TOOL, ANALYSIS_TOOL_CHOICE, ANALYSIS_TOOL_NAME
 from models.schemas import ClaudeResponsePayload, ProtocolAnalysis, MAX_INPUT_LENGTH
 
 logger = logging.getLogger(__name__)
@@ -73,63 +75,8 @@ class LabGuardAPIError(Exception):
 # Private helpers
 # ---------------------------------------------------------------------------
 
-def _extract_json(raw_text: str) -> str | None:
-    """Extract a JSON object string from raw API response text."""
-    text = raw_text.strip()
-
-    # Try direct parse first
-    try:
-        json.loads(text)
-        return text
-    except json.JSONDecodeError:
-        pass
-
-    # Strip markdown code fences
-    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
-    if fence_match:
-        candidate = fence_match.group(1).strip()
-        try:
-            json.loads(candidate)
-            return candidate
-        except json.JSONDecodeError:
-            pass
-
-    # Brace matching — find the outermost { ... }, aware of JSON strings
-    start = text.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if escape:
-            escape = False
-            continue
-        if ch == "\\" and in_string:
-            escape = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                candidate = text[start : i + 1]
-                try:
-                    json.loads(candidate)
-                    return candidate
-                except json.JSONDecodeError:
-                    return None
-    return None
-
-
 def _call_api(protocol_text: str) -> anthropic.types.Message:
-    """Send protocol text to Claude and return the raw API response."""
+    """Send protocol text to Claude with forced tool use and return the response."""
     client = _get_client()
     user_message = build_user_message(protocol_text)
 
@@ -139,6 +86,8 @@ def _call_api(protocol_text: str) -> anthropic.types.Message:
             max_tokens=MAX_TOKENS,
             temperature=TEMPERATURE,
             system=ANALYSIS_SYSTEM_PROMPT,
+            tools=[ANALYSIS_TOOL],
+            tool_choice=ANALYSIS_TOOL_CHOICE,
             messages=[{"role": "user", "content": user_message}],
         )
     except anthropic.AuthenticationError:
@@ -166,12 +115,44 @@ def _call_api(protocol_text: str) -> anthropic.types.Message:
         )
 
 
+def _extract_tool_input(response: anthropic.types.Message) -> dict:
+    """Return the input dict from the forced tool_use content block."""
+    if not response.content:
+        raise LabGuardAPIError(
+            "Claude returned an empty response. Please try again."
+        )
+
+    for block in response.content:
+        # Support both SDK objects (attr access) and dict-like mocks
+        block_type = getattr(block, "type", None) or (
+            block.get("type") if isinstance(block, dict) else None
+        )
+        block_name = getattr(block, "name", None) or (
+            block.get("name") if isinstance(block, dict) else None
+        )
+        if block_type == "tool_use" and block_name == ANALYSIS_TOOL_NAME:
+            tool_input = getattr(block, "input", None)
+            if tool_input is None and isinstance(block, dict):
+                tool_input = block.get("input")
+            if isinstance(tool_input, dict):
+                return tool_input
+
+    logger.error(
+        "No %s tool_use block in response; content types: %s",
+        ANALYSIS_TOOL_NAME,
+        [getattr(b, "type", None) for b in response.content],
+    )
+    raise LabGuardAPIError(
+        "Claude returned an unexpected response format. Please try again."
+    )
+
+
 def _parse_response(
     response: anthropic.types.Message,
     protocol_text: str,
 ) -> ProtocolAnalysis:
     """Parse Claude's raw response into a validated ProtocolAnalysis."""
-    # Check for truncation
+    # Truncation: tool_use blocks can be cut off mid-JSON
     if response.stop_reason == "max_tokens":
         logger.warning("Response truncated (max_tokens reached)")
         raise LabGuardAPIError(
@@ -179,34 +160,10 @@ def _parse_response(
             "Try submitting a shorter protocol."
         )
 
-    # Extract text content
-    if not response.content:
-        raise LabGuardAPIError(
-            "Claude returned an empty response. Please try again."
-        )
-    raw_text = response.content[0].text
+    tool_input = _extract_tool_input(response)
 
-    # Extract JSON
-    json_string = _extract_json(raw_text)
-    if json_string is None:
-        logger.error("No JSON found in response: %s", raw_text[:500])
-        raise LabGuardAPIError(
-            "Claude returned an unexpected response format. "
-            "Please try again."
-        )
-
-    # Parse JSON
     try:
-        data = json.loads(json_string)
-    except json.JSONDecodeError as exc:
-        logger.error("JSON decode error: %s", exc)
-        raise LabGuardAPIError(
-            "Claude returned malformed data. Please try again."
-        )
-
-    # Validate against Pydantic schema
-    try:
-        payload = ClaudeResponsePayload.model_validate(data)
+        payload = ClaudeResponsePayload.model_validate(tool_input)
     except Exception as exc:
         logger.error("Schema validation error: %s", exc)
         raise LabGuardAPIError(

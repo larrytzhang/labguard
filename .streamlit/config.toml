@@ -1,2 +1,7 @@
 [theme]
 primaryColor = "#059669"
+
+# Hide the Deploy button and hamburger (3-dot) menu in the top-right for a
+# clean demo-mode look. "viewer" removes the toolbar entirely.
+[client]
+toolbarMode = "viewer"
